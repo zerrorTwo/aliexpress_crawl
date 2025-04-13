@@ -9,37 +9,20 @@ import time
 import csv
 import pandas as pd
 import os
-import psutil
-
-
-def cleanup_chromedriver():
-    for proc in psutil.process_iter(["name"]):
-        if proc.info["name"] in ["chromedriver.exe", "chromedriver"]:
-            try:
-                proc.kill()
-                print(f"Killed existing chromedriver process: {proc.pid}")
-            except:
-                pass
+import re
 
 
 def setup_driver():
     chrome_options = Options()
+    chrome_options.add_argument("--headless")  # Tắt headless để debug
+    chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     )
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_argument("--start-maximized")  # Mở trình duyệt toàn màn hình
-    try:
-        cleanup_chromedriver()
-        driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()), options=chrome_options
-        )
-        print("Chrome driver initialized successfully!")
-        return driver
-    except Exception as e:
-        print(f"Error initializing Chrome driver: {e}")
-        raise
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()), options=chrome_options
+    )
+    return driver
 
 
 def save_product_to_csv(data, filename="aliexpress_product_details.csv"):
@@ -66,25 +49,10 @@ def crawl_product_details(driver, lv3_href, lv3_title):
     product_data = []
 
     try:
-        # Đảm bảo chỉ có 1 tab
-        while len(driver.window_handles) > 1:
-            driver.switch_to.window(driver.window_handles[-1])
-            driver.close()
-        driver.switch_to.window(driver.window_handles[0])
-
         driver.get(lv3_href)
-        time.sleep(10)
-        print(f"Number of tabs after loading {lv3_href}: {len(driver.window_handles)}")
+        time.sleep(7)  # Đợi trang tải
 
-        # Đóng tab pop-up
-        if len(driver.window_handles) > 1:
-            print(f"Detected extra tabs, closing them...")
-            while len(driver.window_handles) > 1:
-                driver.switch_to.window(driver.window_handles[-1])
-                driver.close()
-            driver.switch_to.window(driver.window_handles[0])
-
-        # Đợi product cards
+        # Đợi các product cards xuất hiện
         try:
             WebDriverWait(driver, 15).until(
                 EC.presence_of_all_elements_located(
@@ -101,63 +69,64 @@ def crawl_product_details(driver, lv3_href, lv3_title):
 
         main_window = driver.current_window_handle
 
-        for card in product_cards[:5]:
+        for card in product_cards[:5]:  # Giới hạn 5 sản phẩm để thử nghiệm
             try:
+                # Lưu URL sản phẩm
                 product_url = card.get_attribute("href")
                 if not product_url:
                     print(f"No href found for product card at {lv3_href}")
                     continue
 
-                # Đảm bảo chỉ có 1 tab
-                if len(driver.window_handles) > 1:
-                    print(
-                        f"Unexpected tabs before opening {product_url}, closing extras..."
-                    )
-                    while len(driver.window_handles) > 1:
-                        driver.switch_to.window(driver.window_handles[-1])
-                        driver.close()
-                    driver.switch_to.window(main_window)
-
-                # Mở trang sản phẩm
-                driver.execute_script(f"window.open('{product_url}', '_blank');")
-                time.sleep(2)
-
-                # Đợi tab mới
+                # Click để mở tab mới
                 try:
-                    current_tabs = len(driver.window_handles)
-                    print(f"Number of tabs before waiting: {current_tabs}")
-                    WebDriverWait(driver, 15).until(
-                        EC.number_of_windows_to_be(current_tabs)
+                    driver.execute_script("arguments[0].click();", card)
+                    time.sleep(2)
+                except Exception as e:
+                    print(f"Error clicking product card at {product_url}: {e}")
+                    continue
+
+                # Đợi tab mới mở
+                try:
+                    print(
+                        f"Number of tabs before waiting: {len(driver.window_handles)}"
                     )
+                    WebDriverWait(driver, 15).until(EC.number_of_windows_to_be(2))
                     new_window = [w for w in driver.window_handles if w != main_window][
                         0
                     ]
                     driver.switch_to.window(new_window)
-                    time.sleep(2)
                 except Exception as e:
                     print(f"Error switching to new tab for {product_url}: {e}")
                     print(f"Number of tabs after error: {len(driver.window_handles)}")
+                    # Thử mở link trực tiếp nếu tab không mở
+                    if len(driver.window_handles) == 1:
+                        print(f"Falling back to direct navigation for {product_url}")
+                        driver.execute_script(
+                            f"window.open('{product_url}', '_blank');"
+                        )
+                        time.sleep(2)
+                        new_window = [
+                            w for w in driver.window_handles if w != main_window
+                        ][0]
+                        driver.switch_to.window(new_window)
+                    else:
+                        continue
+
+                # Đợi trang sản phẩm tải
+                try:
+                    WebDriverWait(driver, 20).until(
+                        EC.presence_of_element_located(
+                            (By.CSS_SELECTOR, "div.title--wrap--UUHae_g h1")
+                        )
+                    )
+                except Exception as e:
+                    print(
+                        f"Error waiting for product page to load at {product_url}: {e}"
+                    )
+                    print(f"Page source for debugging:\n{driver.page_source[:1000]}...")
                     driver.close()
                     driver.switch_to.window(main_window)
                     continue
-
-                # Thử tải trang
-                for attempt in range(2):
-                    try:
-                        WebDriverWait(driver, 30).until(
-                            EC.presence_of_element_located((By.CSS_SELECTOR, "h1"))
-                        )
-                        break
-                    except:
-                        if attempt == 1:
-                            print(
-                                f"Error waiting for product page to load at {product_url}"
-                            )
-                            print(f"Page source: {driver.page_source[:1000]}...")
-                            driver.close()
-                            driver.switch_to.window(main_window)
-                            continue
-                        time.sleep(5)
 
                 # Thu thập dữ liệu
                 data = {
@@ -208,12 +177,7 @@ def crawl_product_details(driver, lv3_href, lv3_title):
                     if title.text.strip():
                         data["product_title"] = title.text.strip()
                 except:
-                    try:
-                        title = driver.find_element(By.CSS_SELECTOR, "h1")
-                        if title.text.strip():
-                            data["product_title"] = title.text.strip()
-                    except:
-                        pass
+                    pass
 
                 # Lấy sku properties và sku variants
                 try:
@@ -224,19 +188,22 @@ def crawl_product_details(driver, lv3_href, lv3_title):
                     )
                     for prop in property_elements:
                         try:
+                            # Lấy span thứ nhất và làm sạch để chỉ lấy tên thuộc tính
                             title_span = prop.find_element(
-                                By.CSS_SELECTOR, "div.sku-item--title--Z0HLO87"
+                                By.CSS_SELECTOR,
+                                "div.sku-item--title--Z0HLO87 span:first-child",
                             )
-                            prop_name = driver.execute_script(
-                                "return arguments[0].childNodes[0].textContent.trim().replace(/:$/, '')",
-                                title_span,
-                            )
+                            full_text = title_span.get_attribute("textContent").strip()
+                            # Lấy phần trước dấu ":" (hoặc toàn bộ nếu không có dấu ":")
+                            prop_name = re.split(r":", full_text)[0].strip()
                             if prop_name:
                                 sku_properties_list.append(prop_name)
+                            # Lấy variants từ sku-item--skus--StEhULs
                             sku_row = prop.find_element(
                                 By.CSS_SELECTOR, "div.sku-item--skus--StEhULs"
                             )
                             variants = []
+                            # Variants hình ảnh
                             image_variants = sku_row.find_elements(
                                 By.CSS_SELECTOR, "div.sku-item--image--jMUnnGA img"
                             )
@@ -244,6 +211,7 @@ def crawl_product_details(driver, lv3_href, lv3_title):
                                 alt_text = img.get_attribute("alt")
                                 if alt_text and alt_text.strip():
                                     variants.append(alt_text.strip())
+                            # Variants văn bản
                             text_variants = sku_row.find_elements(
                                 By.CSS_SELECTOR, "div.sku-item--text--hYfAukP span"
                             )
@@ -255,8 +223,10 @@ def crawl_product_details(driver, lv3_href, lv3_title):
                         except:
                             continue
 
+                    # Chuyển sku_properties_list thành chuỗi
                     if sku_properties_list:
                         data["sku_properties"] = str(sku_properties_list)
+                    # Chuyển sku_variants_dict thành chuỗi
                     if sku_variants_dict:
                         data["sku_variants"] = ", ".join(
                             f"{key}: {str(value)}"
@@ -265,20 +235,30 @@ def crawl_product_details(driver, lv3_href, lv3_title):
                 except:
                     pass
 
+                # Lưu dữ liệu sản phẩm vào CSV ngay lập tức
                 save_product_to_csv(data)
                 print(f"Saved product data for {product_url}")
 
                 product_data.append(data)
 
-                driver.close()
-                driver.switch_to.window(main_window)
-                time.sleep(1)
+                # Đóng tab mới và quay lại tab chính
+                try:
+                    driver.close()
+                    driver.switch_to.window(main_window)
+                    time.sleep(1)
+                except Exception as e:
+                    print(f"Error closing tab for {product_url}: {e}")
+                    driver.switch_to.window(main_window)
+                    time.sleep(1)
 
             except Exception as e:
                 print(f"Error processing product card for {lv3_href}: {e}")
                 if len(driver.window_handles) > 1:
-                    driver.close()
-                driver.switch_to.window(main_window)
+                    try:
+                        driver.close()
+                        driver.switch_to.window(main_window)
+                    except:
+                        pass
                 time.sleep(1)
                 continue
 
@@ -290,21 +270,10 @@ def crawl_product_details(driver, lv3_href, lv3_title):
 
 def main():
     csv_file = "aliexpress_subcategory_details.csv"
-    if not os.path.isfile(csv_file):
-        print(
-            f"File {csv_file} not found. Please create it with 'lv3_href' and 'lv3_title' columns."
-        )
-        return
-
     try:
         df = pd.read_csv(csv_file)
-        if df.empty or "lv3_href" not in df.columns or "lv3_title" not in df.columns:
-            print(
-                f"File {csv_file} is empty or missing required columns ('lv3_href', 'lv3_title')."
-            )
-            return
-    except Exception as e:
-        print(f"Error reading {csv_file}: {e}")
+    except FileNotFoundError:
+        print(f"File {csv_file} not found.")
         return
 
     driver = None
@@ -334,7 +303,6 @@ def main():
     finally:
         if driver is not None:
             driver.quit()
-        cleanup_chromedriver()
 
     print(f"Total {len(all_data)} products saved to aliexpress_product_details.csv")
 
